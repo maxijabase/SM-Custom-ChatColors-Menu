@@ -30,14 +30,15 @@ enum {
 }
 
 #define PLUGIN_NAME "Custom Chat Colors Menu"
-#define PLUGIN_VERSION "2.11"
+#define PLUGIN_VERSION "2.2"
 #define MAX_COLORS 255
 #define MAX_HEXSTR_SIZE 7
 #define MAX_TAGTEXT_SIZE 32
 
 Menu
 	g_menuMain,
-	g_menuTag,
+	g_menuTagColor,
+	g_menuTagText,
 	g_menuName,
 	g_menuChat;
 ConVar
@@ -56,6 +57,7 @@ bool
 	g_bColorAdminFlags[MAX_COLORS],
 	g_bHideTag[MAXPLAYERS+1],
 	g_bAccess[MAXPLAYERS+1][MAX_ACCESS],
+	g_bWaitingForTagInput[MAXPLAYERS+1],
 	g_bLateLoad;
 char
 	g_strAuth[MAXPLAYERS+1][32],
@@ -179,9 +181,6 @@ public void CCC_OnUserConfigLoaded(int client) {
 		strcopy(g_strColor[client][STRCOLOR_TAG], sizeof(g_strColor[][]), strTag);
 	}
 
-	char strTagText[MAX_TAGTEXT_SIZE];
-	strcopy(g_strTagText[client], sizeof(g_strTagText[]), strTag);
-
 	char strName[MAX_HEXSTR_SIZE];
 	IntToString(CCC_GetColor(client, CCC_NameColor), strName, sizeof(strName));
 	if (IsValidHex(strName)) {
@@ -247,6 +246,26 @@ public Action CCC_OnColor(int client, const char[] strMessage, CCC_ColorType typ
 	return Plugin_Continue;
 }
 
+public Action OnClientSayCommand(int client, const char[] strCommand, const char[] strArgs) {
+	if (!g_bWaitingForTagInput[client]) {
+		return Plugin_Continue;
+	}
+
+	strcopy(g_strTagText[client], sizeof(g_strTagText[]), strArgs);
+	CCC_SetTag(client, strArgs);
+
+	PrintUpdateMessage(client);
+
+	if (g_hSQL != null && IsClientAuthorized(client)) {
+		char strQuery[256];
+		Format(strQuery, sizeof(strQuery), "SELECT tagtext FROM cccm_users WHERE auth = '%s'", g_strAuth[client]);
+		g_hSQL.Query(SQLQuery_TagText, strQuery, GetClientUserId(client), DBPrio_High);
+	}
+
+	g_bWaitingForTagInput[client] = false;
+	return Plugin_Handled;
+}
+
 // ====[COMMANDS]============================================================
 
 public Action Command_Color(int client, int args) {
@@ -304,8 +323,7 @@ public Action Command_TagColor(int client, int args) {
 	return Plugin_Handled;
 }
 
-public Action Command_TagText(int client, int args)
-{
+public Action Command_TagText(int client, int args) {
 	if (!IsValidClient(client)) {
 		return Plugin_Continue;
 	}
@@ -479,23 +497,33 @@ void BuildMainMenu() {
 
 
 	g_menuMain.AddItem("HideTag", "Hide Tag");
-	g_menuMain.AddItem("Tag", "Change Tag Color");
+	g_menuMain.AddItem("TagColor", "Change Tag Color");
+	g_menuMain.AddItem("TagText", "Change Tag Text");
 	g_menuMain.AddItem("Name", "Change Name Color");
 	g_menuMain.AddItem("Chat", "Change Chat Color");
 }
 
-void BuildTagMenu() {
-	g_menuTag = new Menu(MenuHandler_TagColor, MENU_ACTIONS_DEFAULT|MenuAction_DrawItem);
-	g_menuTag.SetTitle("Tag Color");
-	g_menuTag.ExitBackButton = true;
+void BuildTagColorMenu() {
+	g_menuTagColor = new Menu(MenuHandler_TagColor, MENU_ACTIONS_DEFAULT|MenuAction_DrawItem);
+	g_menuTagColor.SetTitle("Tag Color");
+	g_menuTagColor.ExitBackButton = true;
 
-	g_menuTag.AddItem("Reset", "Reset");
+	g_menuTagColor.AddItem("Reset", "Reset");
 
 	char strColorIndex[4];
 	for (int i = 0; i < g_iColorCount; i++) {
 		IntToString(i, strColorIndex, sizeof(strColorIndex));
-		g_menuTag.AddItem(strColorIndex, g_strColorName[i]);
+		g_menuTagColor.AddItem(strColorIndex, g_strColorName[i]);
 	}
+}
+
+void BuildTagTextmenu() {
+	g_menuTagText = new Menu(MenuHandler_TagText, MENU_ACTIONS_DEFAULT);
+	g_menuTagText.SetTitle("Tag Text");
+	g_menuTagText.ExitBackButton = true;
+
+	g_menuTagText.AddItem("Change", "Change Tag Text");
+	g_menuTagText.AddItem("Reset", "Reset");
 }
 
 void BuildNameMenu() {
@@ -556,8 +584,11 @@ int MenuHandler_Settings(Menu menu, MenuAction action, int param1, int param2) {
 				}
 				menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);
 			}
-			if (StrEqual(strBuffer, "Tag")) {
-				DisplayColorMenu(g_menuTag, param1);
+			if (StrEqual(strBuffer, "TagColor")) {
+				DisplayColorMenu(g_menuTagColor, param1);
+			}
+			else if (StrEqual(strBuffer, "TagText")) {
+				DisplayColorMenu(g_menuTagText, param1);
 			}
 			else if (StrEqual(strBuffer, "Name")) {
 				DisplayColorMenu(g_menuName, param1);
@@ -569,10 +600,15 @@ int MenuHandler_Settings(Menu menu, MenuAction action, int param1, int param2) {
 		case MenuAction_DrawItem: {
 			char item[32];
 			menu.GetItem(param2, item, sizeof(item));
-			if (StrEqual(item, "Tag")) {
+			if (StrEqual(item, "TagColor")) {
 				if ((g_iCvarEnabled & ENABLEFLAG_TAG) == 0 || !g_bAccess[param1][ACCESS_TAG]) {
 					return ITEMDRAW_IGNORE;
 				}				
+			}
+			else if (StrEqual(item, "TagText")) {
+				if ((g_iCvarEnabled & ENABLEFLAG_TAG) == 0 || !g_bAccess[param1][ACCESS_TAG]) {
+					return ITEMDRAW_IGNORE;
+				}
 			}
 			else if (StrEqual(item, "Name")) {
 				if ((g_iCvarEnabled & ENABLEFLAG_NAME) == 0 || !g_bAccess[param1][ACCESS_NAME]) {
@@ -644,6 +680,41 @@ int MenuHandler_TagColor(Menu menu, MenuAction action, int param1, int param2) {
 				return ITEMDRAW_DEFAULT;
 			}
 			return ITEMDRAW_DISABLED;
+		}
+	}
+	return 0;
+}
+
+int MenuHandler_TagText(Menu menu, MenuAction action, int param1, int param2) {
+	switch (action) {
+		case MenuAction_Cancel: {
+			if (param2 == MenuCancel_ExitBack) {
+				DisplayColorMenu(g_menuMain, param1);
+			}
+		}
+		case MenuAction_Select: {
+			char strBuffer[32];
+			menu.GetItem(param2, strBuffer, sizeof(strBuffer));
+
+			if (StrEqual(strBuffer, "Reset")) {
+				g_strTagText[param1][0] = '\0';
+				CCC_SetTag(param1, "");
+			}
+			else if (StrEqual(strBuffer, "Change")) {
+				g_bWaitingForTagInput[param1] = true;
+				ReplyToCommand(param1, "\x01[\x03CCC\x01] Enter the new tag text:");
+				return 0;
+			}
+
+			PrintUpdateMessage(param1);
+
+			if (g_hSQL != null && IsClientAuthorized(param1)) {
+				char strQuery[256];
+				Format(strQuery, sizeof(strQuery), "SELECT tagtext FROM cccm_users WHERE auth = '%s'", g_strAuth[param1]);
+				g_hSQL.Query(SQLQuery_TagText, strQuery, GetClientUserId(param1), DBPrio_High);
+			}
+
+			menu.DisplayAt(param1, menu.Selection, MENU_TIME_FOREVER);			
 		}
 	}
 	return 0;
@@ -789,12 +860,13 @@ void Config_Load() {
 	delete keyvalues;
 
 	delete g_menuMain;
-	delete g_menuTag;
+	delete g_menuTagColor;
 	delete g_menuName;
 	delete g_menuChat;
 
 	BuildMainMenu();
-	BuildTagMenu();
+	BuildTagColorMenu();
+	BuildTagTextmenu();
 	BuildNameMenu();
 	BuildChatMenu();
 
