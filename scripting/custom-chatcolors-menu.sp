@@ -108,7 +108,8 @@ public void OnPluginStart() {
 	RegAdminCmd("sm_tagtext", Command_TagText, ADMFLAG_ROOT, "Change tag text to a specified value");
 	RegAdminCmd("sm_namecolor", Command_NameColor, ADMFLAG_ROOT, "Change name color to a specified hexadecimal value");
 	RegAdminCmd("sm_chatcolor", Command_ChatColor, ADMFLAG_ROOT, "Change chat color to a specified hexadecimal value");
-	RegAdminCmd("sm_resettag", Command_ResetTagColor, ADMFLAG_GENERIC, "Reset tag color to default");
+	RegAdminCmd("sm_resettagcolor", Command_ResetTagColor, ADMFLAG_GENERIC, "Reset tag color to default");
+	RegAdminCmd("sm_resettagtext", Command_ResetTagText, ADMFLAG_GENERIC, "Reset tag text to default");
 	RegAdminCmd("sm_resetname", Command_ResetNameColor, ADMFLAG_GENERIC, "Reset name color to default");
 	RegAdminCmd("sm_resetchat", Command_ResetChatColor, ADMFLAG_GENERIC, "Reset chat color to default");
 
@@ -368,6 +369,25 @@ public Action Command_ResetTagColor(int client, int args) {
 		char strQuery[256];
 		Format(strQuery, sizeof(strQuery), "SELECT tagcolor FROM cccm_users WHERE auth = '%s'", g_strAuth[client]);
 		g_hSQL.Query(SQLQuery_TagColor, strQuery, GetClientUserId(client), DBPrio_High);
+	}
+
+	return Plugin_Handled;
+}
+
+public Action Command_ResetTagText(int client, int args) {
+	if (!IsValidClient(client)) {
+		return Plugin_Continue;
+	}
+
+	g_strTagText[client][0] = '\0';
+	CCC_ResetTag(client);
+
+	PrintUpdateMessage(client);
+
+	if (g_hSQL != null && IsClientAuthorized(client)) {
+		char strQuery[256];
+		Format(strQuery, sizeof(strQuery), "SELECT tagtext FROM cccm_users WHERE auth = '%s'", g_strAuth[client]);
+		g_hSQL.Query(SQLQuery_TagText, strQuery, GetClientUserId(client), DBPrio_High);
 	}
 
 	return Plugin_Handled;
@@ -698,7 +718,7 @@ int MenuHandler_TagText(Menu menu, MenuAction action, int param1, int param2) {
 
 			if (StrEqual(strBuffer, "Reset")) {
 				g_strTagText[param1][0] = '\0';
-				CCC_SetTag(param1, "");
+				CCC_ResetTag(param1);
 			}
 			else if (StrEqual(strBuffer, "Change")) {
 				g_bWaitingForTagInput[param1] = true;
