@@ -22,7 +22,7 @@ enum {
 	MAX_STRCOLOR
 }
 
-enum (<<= 1) {
+enum {
 	ENABLEFLAG_TAG = 1,
 	ENABLEFLAG_NAME,
 	ENABLEFLAG_CHAT,
@@ -33,6 +33,7 @@ enum (<<= 1) {
 #define PLUGIN_VERSION "2.11"
 #define MAX_COLORS 255
 #define MAX_HEXSTR_SIZE 7
+#define MAX_TAGTEXT_SIZE 32
 
 Menu
 	g_menuMain,
@@ -51,13 +52,14 @@ int
 AdminFlag
 	 g_iColorFlagList[MAX_COLORS][16];
 bool
-	g_bColorsLoaded[MAXPLAYERS+1],
+	g_bChatConfigLoaded[MAXPLAYERS+1],
 	g_bColorAdminFlags[MAX_COLORS],
 	g_bHideTag[MAXPLAYERS+1],
 	g_bAccess[MAXPLAYERS+1][MAX_ACCESS],
 	g_bLateLoad;
 char
 	g_strAuth[MAXPLAYERS+1][32],
+	g_strTagText[MAXPLAYERS+1][MAX_TAGTEXT_SIZE],
 	g_strColor[MAXPLAYERS+1][MAX_STRCOLOR][MAX_HEXSTR_SIZE],
 	g_strColorName[MAX_COLORS][255],
 	g_strColorHex[MAX_COLORS][255],
@@ -101,6 +103,7 @@ public void OnPluginStart() {
 	RegAdminCmd("sm_ccc", Command_Color, ADMFLAG_GENERIC, "Open Custom Chat Colors Menu");
 	RegAdminCmd("sm_reload_cccm", Command_Reload, ADMFLAG_ROOT, "Reloads Custom Chat Colors Menu config");
 	RegAdminCmd("sm_tagcolor", Command_TagColor, ADMFLAG_ROOT, "Change tag color to a specified hexadecimal value");
+	RegAdminCmd("sm_tagtext", Command_TagText, ADMFLAG_ROOT, "Change tag text to a specified value");
 	RegAdminCmd("sm_namecolor", Command_NameColor, ADMFLAG_ROOT, "Change name color to a specified hexadecimal value");
 	RegAdminCmd("sm_chatcolor", Command_ChatColor, ADMFLAG_ROOT, "Change chat color to a specified hexadecimal value");
 	RegAdminCmd("sm_resettag", Command_ResetTagColor, ADMFLAG_GENERIC, "Reset tag color to default");
@@ -132,7 +135,7 @@ public void OnConVarChange(ConVar convar, const char[] strOldValue, const char[]
 	g_iCvarEnabled = g_hCvarEnabled.IntValue;
 }
 
-void SQL_LoadColors(int client) {
+void LoadChatConfig(int client) {
 	if (!IsClientAuthorized(client)) {
 		return;
 	}
@@ -141,8 +144,8 @@ void SQL_LoadColors(int client) {
 		char strAuth[32], strQuery[256];
 		GetClientAuthId(client, AuthId_Steam2, strAuth, sizeof(strAuth));
 		strcopy(g_strAuth[client], sizeof(g_strAuth[]), strAuth);
-		Format(strQuery, sizeof(strQuery), "SELECT hidetag, tagcolor, namecolor, chatcolor FROM cccm_users WHERE auth = '%s'", g_strAuth[client]);
-		g_hSQL.Query(SQLQuery_LoadColors, strQuery, GetClientUserId(client), DBPrio_High);
+		Format(strQuery, sizeof(strQuery), "SELECT hidetag, tagcolor, tagtext, namecolor, chatcolor FROM cccm_users WHERE auth = '%s'", g_strAuth[client]);
+		g_hSQL.Query(SQL_OnChatConfigReceived, strQuery, GetClientUserId(client), DBPrio_High);
 	}
 }
 
@@ -151,7 +154,7 @@ public void OnConfigsExecuted() {
 }
 
 public void OnClientConnected(int client) {
-	g_bColorsLoaded[client] = false;
+	g_bChatConfigLoaded[client] = false;
 	g_bHideTag[client] = false;
 	g_bAccess[client][ACCESS_TAG] = false;
 	g_bAccess[client][ACCESS_NAME] = false;
@@ -159,13 +162,14 @@ public void OnClientConnected(int client) {
 	g_bAccess[client][ACCESS_HIDETAG] = false;
 
 	g_strAuth[client][0] = '\0';
+	g_strTagText[client][0] = '\0';
 	g_strColor[client][STRCOLOR_TAG][0] = '\0';
 	g_strColor[client][STRCOLOR_NAME][0] = '\0';
 	g_strColor[client][STRCOLOR_CHAT][0] = '\0';
 }
 
 public void CCC_OnUserConfigLoaded(int client) {
-	if (g_bColorsLoaded[client]) {
+	if (g_bChatConfigLoaded[client]) {
 		return;
 	}
 
@@ -174,6 +178,9 @@ public void CCC_OnUserConfigLoaded(int client) {
 	if (IsValidHex(strTag)) {
 		strcopy(g_strColor[client][STRCOLOR_TAG], sizeof(g_strColor[][]), strTag);
 	}
+
+	char strTagText[MAX_TAGTEXT_SIZE];
+	strcopy(g_strTagText[client], sizeof(g_strTagText[]), strTag);
 
 	char strName[MAX_HEXSTR_SIZE];
 	IntToString(CCC_GetColor(client, CCC_NameColor), strName, sizeof(strName));
@@ -210,7 +217,7 @@ public void OnClientPostAdminCheck(int client) {
 void CheckSettings(int client) {
 	bool access;
 	if ((access = CheckCommandAccess(client, "sm_ccc", ADMFLAG_GENERIC))) {
-		SQL_LoadColors(client);
+		LoadChatConfig(client);
 	}
 	g_bAccess[client][ACCESS_PLUGIN] = access;
 	g_bAccess[client][ACCESS_TAG] = access && CheckCommandAccess(client, "sm_ccc_tag", ADMFLAG_GENERIC);
@@ -292,6 +299,38 @@ public Action Command_TagColor(int client, int args) {
 		char strQuery[256];
 		Format(strQuery, sizeof(strQuery), "SELECT tagcolor FROM cccm_users WHERE auth = '%s'", g_strAuth[client]);
 		g_hSQL.Query(SQLQuery_TagColor, strQuery, GetClientUserId(client), DBPrio_High);
+	}
+
+	return Plugin_Handled;
+}
+
+public Action Command_TagText(int client, int args)
+{
+	if (!IsValidClient(client)) {
+		return Plugin_Continue;
+	}
+
+	if (args < 1) {
+		ReplyToCommand(client, "\x01[\x03CCC\x01] Usage: sm_tagtext <text>");
+		return Plugin_Handled;
+	}
+
+	char strArg[MAX_TAGTEXT_SIZE];
+	GetCmdArgString(strArg, sizeof(strArg));
+	if (strArg[0] == '\0') {
+		ReplyToCommand(client, "\x01[\x03CCC\x01] Usage: sm_tagtext <text>");
+		return Plugin_Handled;
+	}
+
+	strcopy(g_strTagText[client], sizeof(g_strTagText[]), strArg);
+	CCC_SetTag(client, strArg);
+
+	PrintUpdateMessage(client);
+
+	if (g_hSQL != null && IsClientAuthorized(client)) {
+		char strQuery[256];
+		Format(strQuery, sizeof(strQuery), "SELECT tagtext FROM cccm_users WHERE auth = '%s'", g_strAuth[client]);
+		g_hSQL.Query(SQLQuery_TagText, strQuery, GetClientUserId(client), DBPrio_High);
 	}
 
 	return Plugin_Handled;
@@ -784,6 +823,7 @@ void SQLQuery_Connect(Database db, const char[] error, any data) {
 			... "auth VARCHAR(32) UNIQUE, "
 			... "hidetag VARCHAR(1), "
 			... "tagcolor VARCHAR(7), "
+			... "tagtext VARCHAR(32), "
 			... "namecolor VARCHAR(7), "
 			... "chatcolor VARCHAR(7), "
 			... "PRIMARY KEY (id)"
@@ -802,6 +842,7 @@ void SQLQuery_Connect(Database db, const char[] error, any data) {
 			... "auth varchar(32) UNIQUE, "
 			... "hidetag varchar(1), "
 			... "tagcolor varchar(7), "
+			... "tagtext varchar(32), "
 			... "namecolor varchar(7), "
 			... "chatcolor varchar(7)"
 			... ")"
@@ -816,12 +857,12 @@ void SQLQuery_Connect(Database db, const char[] error, any data) {
 
 	for (int i = 1; i <= MaxClients; i++) {
 		if (IsClientInGame(i)) {
-			SQL_LoadColors(i);
+			LoadChatConfig(i);
 		}
 	}
 }
 
-void SQLQuery_LoadColors(Database db, DBResultSet results, const char[] error, any data) {
+void SQL_OnChatConfigReceived(Database db, DBResultSet results, const char[] error, any data) {
 	int client = GetClientOfUserId(data);
 	if (!IsValidClient(client)) {
 		return;
@@ -845,19 +886,26 @@ void SQLQuery_LoadColors(Database db, DBResultSet results, const char[] error, a
 			strcopy(g_strColor[client][STRCOLOR_TAG], sizeof(g_strColor[][]), "-1");
 		}
 
-		results.FetchString(2, strName, sizeof(strName));
+		char tagText[MAX_TAGTEXT_SIZE];
+		results.FetchString(2, tagText, sizeof(tagText)); 
+		if(tagText[0] != '\0') {
+			strcopy(g_strTagText[client], sizeof(g_strTagText[]), tagText);
+			CCC_SetTag(client, g_strTagText[client]);
+		}
+
+		results.FetchString(3, strName, sizeof(strName));
 		if (IsValidHex(strName)) {
 			strcopy(g_strColor[client][STRCOLOR_NAME], sizeof(g_strColor[][]), strName);
 			CCC_SetColor(client, CCC_NameColor, StringToInt(g_strColor[client][STRCOLOR_NAME], 16), false);
 		}
 
-		results.FetchString(3, strChat, sizeof(strChat));
+		results.FetchString(4, strChat, sizeof(strChat));
 		if (IsValidHex(strChat)) {
 			strcopy(g_strColor[client][ACCESS_CHAT], sizeof(g_strColor[][]), strChat);
 			CCC_SetColor(client, CCC_ChatColor, StringToInt(g_strColor[client][STRCOLOR_CHAT], 16), false);
 		}
 
-		g_bColorsLoaded[client] = true;
+		g_bChatConfigLoaded[client] = true;
 	}
 }
 
@@ -903,6 +951,29 @@ void SQLQuery_TagColor(Database db, DBResultSet results, const char[] error, any
 	else {
 		char strQuery[256];
 		Format(strQuery, sizeof(strQuery), "UPDATE cccm_users SET tagcolor = '%s' WHERE auth = '%s'", g_strColor[client][STRCOLOR_TAG], g_strAuth[client]);
+		g_hSQL.Query(SQLQuery_Update, strQuery, _, DBPrio_Normal);
+	}
+}
+
+void SQLQuery_TagText(Database db, DBResultSet results, const char[] error, any data) {
+	int client = GetClientOfUserId(data);
+	if (!IsValidClient(client)) {
+		return;
+	}
+
+	if (db == null || results == null) {
+		LogError("SQL Error: %s", error);
+		return;
+	}
+
+	if (results.RowCount == 0) {
+		char strQuery[256];
+		Format(strQuery, sizeof(strQuery), "INSERT INTO cccm_users (tagtext, auth) VALUES ('%s', '%s')", g_strTagText[client], g_strAuth[client]);
+		g_hSQL.Query(SQLQuery_Update, strQuery, _, DBPrio_High);
+	}
+	else {
+		char strQuery[256];
+		Format(strQuery, sizeof(strQuery), "UPDATE cccm_users SET tagtext = '%s' WHERE auth = '%s'", g_strTagText[client], g_strAuth[client]);
 		g_hSQL.Query(SQLQuery_Update, strQuery, _, DBPrio_Normal);
 	}
 }
