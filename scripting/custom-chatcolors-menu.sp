@@ -1,8 +1,11 @@
 #pragma semicolon 1
 #pragma newdecls required
+
 #include <sourcemod>
 #include <regex>
 #include <ccc>
+#include <autoexecconfig>
+
 #include "cccm.inc"
 #include "color_literals.inc"
 
@@ -11,6 +14,15 @@
 #define MAX_COLORS 255
 #define MAX_HEXSTR_SIZE 7
 #define MAX_TAGTEXT_SIZE 32
+
+enum CCCFeatureType {
+  FEATURE_TAG_TEXT, 
+  FEATURE_TAG_COLOR, 
+  FEATURE_NAME_COLOR, 
+  FEATURE_CHAT_COLOR, 
+  FEATURE_HIDE_TAG, 
+  FEATURE_COUNT
+}
 
 enum ColorType {
   COLOR_TAG, 
@@ -33,6 +45,12 @@ enum struct ColorData {
   char name[255];
   char hex[255];
 }
+
+ConVar g_cvTagTextFlag;
+ConVar g_cvTagColorFlag;
+ConVar g_cvNameColorFlag;
+ConVar g_cvChatColorFlag;
+ConVar g_cvHideTagFlag;
 
 Menu g_menuMain;
 Menu g_menuTagColor;
@@ -66,9 +84,18 @@ public Plugin myinfo = {
 }
 
 public void OnPluginStart() {
-  CreateConVar("sm_cccm_version", PLUGIN_VERSION, PLUGIN_NAME, FCVAR_SPONLY | FCVAR_DONTRECORD | FCVAR_NOTIFY).SetString(PLUGIN_VERSION);
+  AutoExecConfig_SetCreateFile(true);
+  AutoExecConfig_SetFile("cccm");
+
+  AutoExecConfig_CreateConVar("sm_cccm_version", PLUGIN_VERSION, PLUGIN_NAME, FCVAR_SPONLY | FCVAR_DONTRECORD | FCVAR_NOTIFY).SetString(PLUGIN_VERSION);
+  g_cvTagTextFlag = AutoExecConfig_CreateConVar("sm_cccm_tag_text_flag", "", "Admin flag required to modify tag text. Leave empty for public access.");
+  g_cvTagColorFlag = AutoExecConfig_CreateConVar("sm_cccm_tag_color_flag", "", "Admin flag required to modify tag color. Leave empty for public access.");
+  g_cvNameColorFlag = AutoExecConfig_CreateConVar("sm_cccm_name_color_flag", "", "Admin flag required to modify name color. Leave empty for public access.");
+  g_cvChatColorFlag = AutoExecConfig_CreateConVar("sm_cccm_chat_color_flag", "", "Admin flag required to modify chat color. Leave empty for public access.");
+  g_cvHideTagFlag = AutoExecConfig_CreateConVar("sm_cccm_hide_tag_flag", "", "Admin flag required to hide tag. Leave empty for public access.");
   
-  AutoExecConfig();
+  AutoExecConfig_CleanFile();
+  AutoExecConfig_ExecuteFile();
   
   RegConsoleCmd("sm_ccc", Command_Color, "Open Custom Chat Colors Menu");
   
@@ -86,7 +113,7 @@ public void OnPluginStart() {
   else {
     SetFailState("Database configuration 'cccm' not found!");
   }
-
+  
   if (g_Late) {
     for (int i = 1; i <= MaxClients; i++) {
       if (IsValidClient(i)) {
@@ -94,29 +121,6 @@ public void OnPluginStart() {
       }
     }
   }
-}
-
-void LoadChatConfig(int client) {
-  if (!IsClientAuthorized(client)) {
-    return;
-  }
-  
-  if (g_Database == null) {
-    return;
-  }
-
-  char name[MAX_NAME_LENGTH];
-  GetClientName(client, name, sizeof(name));
-
-  char steamid[32];
-  if (!GetClientAuthId(client, AuthId_Steam2, steamid, sizeof(steamid))) {
-    return;
-  }
-
-  char query[256];
-  strcopy(g_Players[client].steamid, sizeof(g_Players[].steamid), steamid);
-  g_Database.Format(query, sizeof(query), "SELECT hidetag, tagcolor, tagtext, namecolor, chatcolor FROM cccm_users WHERE steamid = '%s'", g_Players[client].steamid);
-  g_Database.Query(SQL_OnChatConfigReceived, query, GetClientUserId(client), DBPrio_High);
 }
 
 public void OnConfigsExecuted() {
@@ -146,7 +150,7 @@ public void CCC_OnUserConfigLoaded(int client) {
   if (tag_text[0] != '\0') {
     strcopy(g_Players[client].tag_text, sizeof(g_Players[].tag_text), tag_text);
   }
-
+  
   // get tag color
   char tag_color[MAX_HEXSTR_SIZE];
   IntToString(CCC_GetColor(client, CCC_TagColor), tag_color, sizeof(tag_color));
@@ -228,11 +232,8 @@ public int Native_IsTagHidden(Handle plugin, int numParams) {
   return g_Players[client].hideTag;
 }
 
-// ====[MENUS]===============================================================
-
-// ------------------------------- Build Menu
 void BuildMainMenu() {
-  g_menuMain = new Menu(MenuHandler_Settings, MENU_ACTIONS_DEFAULT | MenuAction_DisplayItem);
+  g_menuMain = new Menu(MenuHandler_Settings, MENU_ACTIONS_DEFAULT | MenuAction_DisplayItem | MenuAction_DrawItem);
   g_menuMain.SetTitle("Custom Chat Colors");
   
   g_menuMain.AddItem("HideTag", "Hide Tag");
@@ -293,8 +294,6 @@ void BuildChatMenu() {
   }
 }
 
-// ------------------------------- Display Menu
-
 void DisplayColorMenu(Menu menu, int client) {
   if (IsVoteInProgress()) {
     ReplyToCommand(client, "\x01[\x03CCC\x01] Vote In Progress.");
@@ -302,8 +301,6 @@ void DisplayColorMenu(Menu menu, int client) {
   }
   menu.Display(client, MENU_TIME_FOREVER);
 }
-
-// ------------------------------- Menu Handlers
 
 int MenuHandler_Settings(Menu menu, MenuAction action, int param1, int param2) {
   switch (action) {
@@ -344,6 +341,28 @@ int MenuHandler_Settings(Menu menu, MenuAction action, int param1, int param2) {
         }
       }
     }
+    case MenuAction_DrawItem: {
+      char item[32];
+      menu.GetItem(param2, item, sizeof(item));
+      
+      if (StrEqual(item, "HideTag") && !HasFeatureAccess(param1, FEATURE_HIDE_TAG)) {
+        return ITEMDRAW_IGNORE;
+      }
+      else if (StrEqual(item, "TagColor") && !HasFeatureAccess(param1, FEATURE_TAG_COLOR)) {
+        return ITEMDRAW_IGNORE;
+      }
+      else if (StrEqual(item, "TagText") && !HasFeatureAccess(param1, FEATURE_TAG_TEXT)) {
+        return ITEMDRAW_IGNORE;
+      }
+      else if (StrEqual(item, "Name") && !HasFeatureAccess(param1, FEATURE_NAME_COLOR)) {
+        return ITEMDRAW_IGNORE;
+      }
+      else if (StrEqual(item, "Chat") && !HasFeatureAccess(param1, FEATURE_CHAT_COLOR)) {
+        return ITEMDRAW_IGNORE;
+      }
+      
+      return ITEMDRAW_DEFAULT;
+    }
   }
   return 0;
 }
@@ -356,6 +375,12 @@ int MenuHandler_TagColor(Menu menu, MenuAction action, int param1, int param2) {
       }
     }
     case MenuAction_Select: {
+      if (!HasFeatureAccess(param1, FEATURE_TAG_COLOR)) {
+        PrintToChat(param1, "\x01[\x03CCC\x01] You don't have permission to change your tag color.");
+        DisplayColorMenu(g_menuMain, param1);
+        return 0;
+      }
+      
       char strBuffer[32];
       menu.GetItem(param2, strBuffer, sizeof(strBuffer));
       
@@ -391,6 +416,12 @@ int MenuHandler_TagText(Menu menu, MenuAction action, int param1, int param2) {
       }
     }
     case MenuAction_Select: {
+      if (!HasFeatureAccess(param1, FEATURE_TAG_TEXT)) {
+        PrintToChat(param1, "\x01[\x03CCC\x01] You don't have permission to change your tag text.");
+        DisplayColorMenu(g_menuMain, param1);
+        return 0;
+      }
+      
       char strBuffer[32];
       menu.GetItem(param2, strBuffer, sizeof(strBuffer));
       
@@ -426,6 +457,12 @@ int MenuHandler_NameColor(Menu menu, MenuAction action, int param1, int param2) 
       }
     }
     case MenuAction_Select: {
+      if (!HasFeatureAccess(param1, FEATURE_NAME_COLOR)) {
+        PrintToChat(param1, "\x01[\x03CCC\x01] You don't have permission to change your name color.");
+        DisplayColorMenu(g_menuMain, param1);
+        return 0;
+      }
+      
       char strBuffer[32];
       menu.GetItem(param2, strBuffer, sizeof(strBuffer));
       
@@ -461,6 +498,12 @@ int MenuHandler_ChatColor(Menu menu, MenuAction action, int param1, int param2) 
       }
     }
     case MenuAction_Select: {
+      if (!HasFeatureAccess(param1, FEATURE_CHAT_COLOR)) {
+        PrintToChat(param1, "\x01[\x03CCC\x01] You don't have permission to change your chat color.");
+        DisplayColorMenu(g_menuMain, param1);
+        return 0;
+      }
+      
       char strBuffer[32];
       menu.GetItem(param2, strBuffer, sizeof(strBuffer));
       
@@ -487,65 +530,6 @@ int MenuHandler_ChatColor(Menu menu, MenuAction action, int param1, int param2) 
   }
   return 0;
 }
-
-// ====[CONFIGURATION]=======================================================
-
-void Config_Load() {
-  if (!FileExists(g_strConfigFile)) {
-    SetFailState("Configuration file %s not found!", g_strConfigFile);
-    return;
-  }
-  
-  KeyValues keyvalues = new KeyValues("CCC Menu Colors");
-  if (!keyvalues.ImportFromFile(g_strConfigFile)) {
-    SetFailState("Improper structure for configuration file %s!", g_strConfigFile);
-    return;
-  }
-  
-  if (!keyvalues.GotoFirstSubKey()) {
-    SetFailState("Can't find configuration file %s!", g_strConfigFile);
-    return;
-  }
-  
-  // Reset all color data
-  for (int i = 0; i < MAX_COLORS; i++) {
-    g_Colors[i].name[0] = '\0';
-    g_Colors[i].hex[0] = '\0';
-  }
-  
-  g_iColorCount = 0;
-  do {
-    keyvalues.GetString("name", g_Colors[g_iColorCount].name, sizeof(g_Colors[].name));
-    keyvalues.GetString("hex", g_Colors[g_iColorCount].hex, sizeof(g_Colors[].hex));
-    ReplaceString(g_Colors[g_iColorCount].hex, sizeof(g_Colors[].hex), "#", "", false);
-    
-    if (!IsValidHex(g_Colors[g_iColorCount].hex)) {
-      LogError("Invalid hexadecimal value for color %s.", g_Colors[g_iColorCount].name);
-      g_Colors[g_iColorCount].name[0] = '\0';
-      g_Colors[g_iColorCount].hex[0] = '\0';
-    }
-    
-    g_iColorCount++;
-  } while (keyvalues.GotoNextKey());
-  delete keyvalues;
-  
-  // Rebuild menus with new color data
-  delete g_menuMain;
-  delete g_menuTagColor;
-  delete g_menuTagText;
-  delete g_menuName;
-  delete g_menuChat;
-  
-  BuildMainMenu();
-  BuildTagColorMenu();
-  BuildTagTextmenu();
-  BuildNameMenu();
-  BuildChatMenu();
-  
-  LogMessage("Loaded %i colors from configuration file %s.", g_iColorCount, g_strConfigFile);
-}
-
-// ====[SQL QUERIES]=========================================================
 
 void SQLQuery_Connect(Database db, const char[] error, any data) {
   if (db == null) {
@@ -626,7 +610,7 @@ void SQL_OnChatConfigReceived(Database db, DBResultSet results, const char[] err
   if (results.RowCount == 0) {
     return;
   }
-
+  
   while (results.FetchRow()) {
     // get hide tag
     g_Players[client].hideTag = view_as<bool>(results.FetchInt(0));
@@ -638,7 +622,7 @@ void SQL_OnChatConfigReceived(Database db, DBResultSet results, const char[] err
       strcopy(g_Players[client].tag_color, sizeof(g_Players[].tag_color), tag_color);
       CCC_SetColor(client, CCC_TagColor, StringToInt(g_Players[client].tag_color, 16), false);
     }
-
+    
     // get tag text
     char tag_text[MAX_TAGTEXT_SIZE];
     results.FetchString(2, tag_text, sizeof(tag_text));
@@ -782,13 +766,124 @@ void SQLQuery_ChatColor(Database db, DBResultSet results, const char[] error, an
   }
 }
 
-void SQLQuery_Update(Handle owner, Handle hndl, const char[] strError, any data) {
-  if (hndl == null) {
-    LogError("SQL Error: %s", strError);
+void SQLQuery_Update(Database db, DBResultSet results, const char[] error, any data) {
+  if (error[0] != '\0') {
+    LogError("SQL Error: %s", error);
   }
 }
 
-// ====[UTILITY FUNCTIONS]==============================================================
+bool HasFeatureAccess(int client, CCCFeatureType featureType) {
+  if (client <= 0 || client > MaxClients || !IsClientInGame(client)) {
+    return false;
+  }
+  
+  ConVar featureConVar;
+  switch (featureType) {
+    case FEATURE_TAG_TEXT:
+    featureConVar = g_cvTagTextFlag;
+    case FEATURE_TAG_COLOR:
+    featureConVar = g_cvTagColorFlag;
+    case FEATURE_NAME_COLOR:
+    featureConVar = g_cvNameColorFlag;
+    case FEATURE_CHAT_COLOR:
+    featureConVar = g_cvChatColorFlag;
+    case FEATURE_HIDE_TAG:
+    featureConVar = g_cvHideTagFlag;
+    default:
+    return false;
+  }
+  
+  char requiredFlag[32];
+  featureConVar.GetString(requiredFlag, sizeof(requiredFlag));
+  
+  if (requiredFlag[0] == '\0') {
+    return true;
+  }
+  
+  AdminFlag flag;
+  if (!FindFlagByChar(requiredFlag[0], flag)) {
+    LogError("Invalid admin flag specified: %s", requiredFlag);
+    return true;
+  }
+  
+  return CheckCommandAccess(client, "sm_cccm_access", FlagToBit(flag), true);
+}
+
+void Config_Load() {
+  if (!FileExists(g_strConfigFile)) {
+    SetFailState("Configuration file %s not found!", g_strConfigFile);
+    return;
+  }
+  
+  KeyValues keyvalues = new KeyValues("CCC Menu Colors");
+  if (!keyvalues.ImportFromFile(g_strConfigFile)) {
+    SetFailState("Improper structure for configuration file %s!", g_strConfigFile);
+    return;
+  }
+  
+  if (!keyvalues.GotoFirstSubKey()) {
+    SetFailState("Can't find configuration file %s!", g_strConfigFile);
+    return;
+  }
+  
+  for (int i = 0; i < MAX_COLORS; i++) {
+    g_Colors[i].name[0] = '\0';
+    g_Colors[i].hex[0] = '\0';
+  }
+  
+  g_iColorCount = 0;
+  do {
+    keyvalues.GetString("name", g_Colors[g_iColorCount].name, sizeof(g_Colors[].name));
+    keyvalues.GetString("hex", g_Colors[g_iColorCount].hex, sizeof(g_Colors[].hex));
+    ReplaceString(g_Colors[g_iColorCount].hex, sizeof(g_Colors[].hex), "#", "", false);
+    
+    if (!IsValidHex(g_Colors[g_iColorCount].hex)) {
+      LogError("Invalid hexadecimal value for color %s.", g_Colors[g_iColorCount].name);
+      g_Colors[g_iColorCount].name[0] = '\0';
+      g_Colors[g_iColorCount].hex[0] = '\0';
+    }
+    
+    g_iColorCount++;
+  } while (keyvalues.GotoNextKey());
+  delete keyvalues;
+  
+  delete g_menuMain;
+  delete g_menuTagColor;
+  delete g_menuTagText;
+  delete g_menuName;
+  delete g_menuChat;
+  
+  BuildMainMenu();
+  BuildTagColorMenu();
+  BuildTagTextmenu();
+  BuildNameMenu();
+  BuildChatMenu();
+  
+  LogMessage("Loaded %i colors from configuration file %s.", g_iColorCount, g_strConfigFile);
+}
+
+void LoadChatConfig(int client) {
+  if (!IsClientAuthorized(client)) {
+    return;
+  }
+  
+  if (g_Database == null) {
+    return;
+  }
+  
+  char name[MAX_NAME_LENGTH];
+  GetClientName(client, name, sizeof(name));
+  
+  char steamid[32];
+  if (!GetClientAuthId(client, AuthId_Steam2, steamid, sizeof(steamid))) {
+    return;
+  }
+  
+  char query[256];
+  strcopy(g_Players[client].steamid, sizeof(g_Players[].steamid), steamid);
+  g_Database.Format(query, sizeof(query), "SELECT hidetag, tagcolor, tagtext, namecolor, chatcolor FROM cccm_users WHERE steamid = '%s'", g_Players[client].steamid);
+  g_Database.Query(SQL_OnChatConfigReceived, query, GetClientUserId(client), DBPrio_High);
+}
 
 bool IsValidClient(int client) {
   return (0 < client <= MaxClients && IsClientInGame(client));
